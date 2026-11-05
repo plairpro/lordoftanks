@@ -83,6 +83,10 @@ h2.h{font-family:var(--font-display);font-weight:400;font-size:clamp(26px,5vw,40
 .lbl{font-size:12px;color:var(--paper);opacity:.8;text-shadow:0 1px 2px rgba(0,0,0,.7)}
 .a .bar>i{background:var(--team-a)} .b .bar>i{background:var(--team-b)}
 .bar.sm>i{background:var(--gold)!important}
+#rounds{position:absolute;top:calc(84px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;font-family:var(--font-display);font-size:26px;text-shadow:0 1px 3px rgba(0,0,0,.7)}
+#rounds b{font-weight:400;min-width:1ch;text-align:center}
+#rounds b:first-child{color:var(--team-a)} #rounds b:last-child{color:var(--team-b)}
+#rounds span{font-family:var(--font-body);font-size:12px;color:var(--paper);opacity:.75}
 #toast{position:absolute;top:22%;left:0;right:0;text-align:center;font-family:var(--font-display);font-size:clamp(28px,6vw,54px);text-shadow:0 2px 0 rgba(0,0,0,.4);opacity:0;transition:opacity .25s}
 #toast.on{opacity:1}
 .float{position:absolute;font-family:var(--font-display);font-size:18px;text-shadow:0 1px 3px rgba(0,0,0,.8);transform:translate(-50%,-50%);white-space:nowrap}
@@ -109,6 +113,7 @@ h2.h{font-family:var(--font-display);font-weight:400;font-size:clamp(26px,5vw,40
     <div class="side a" id="sideA"><div class="who" id="whoA">Вы</div><div class="bar"><i id="hpA"></i></div><div class="lbl">статуя</div><div class="bar sm"><i id="stA"></i></div></div>
     <div class="side r b" id="sideB"><div class="who" id="whoB">Соперник</div><div class="bar"><i id="hpB"></i></div><div class="lbl">статуя</div><div class="bar sm"><i id="stB"></i></div></div>
   </div>
+  <div id="rounds" aria-label="Счёт раундов"><b id="roundsMe">0</b><span>до 5</span><b id="roundsThem">0</b></div>
   <div id="toast"></div>
   <div id="floats"></div>
   <div id="inds"></div>
@@ -167,6 +172,12 @@ h2.h{font-family:var(--font-display);font-weight:400;font-size:clamp(26px,5vw,40
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 /* =========================================================
    Утилиты
@@ -177,6 +188,8 @@ const lerp = (a,b,t) => a+(b-a)*t;
 const wrap = a => { while(a>Math.PI)a-=Math.PI*2; while(a<-Math.PI)a+=Math.PI*2; return a; };
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
 const isTouch = matchMedia('(pointer:coarse)').matches || 'ontouchstart' in window;
+// ?fx=low — без постобработки и с тенями попроще (для слабых компьютеров)
+const LOW_FX = isTouch || new URLSearchParams(location.search).get('fx') === 'low';
 
 /* =========================================================
    Танки: 12 очков на скорость / броню / скорострельность / пробитие
@@ -221,11 +234,17 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 1.0;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#9fb3c2');
-scene.fog = new THREE.Fog('#9fb3c2', 140, 260);
+scene.background = new THREE.Color('#aab6bf');
+scene.fog = new THREE.Fog('#aab6bf', 150, 280);
+// окружение для отражений и мягкого заполняющего света (PBR)
+{
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+  pmrem.dispose();
+}
 
 const cam = new THREE.OrthographicCamera(-1,1,1,-1,1,500);
 const CAM_OFF = new THREE.Vector3(60, 72, 60);
@@ -233,10 +252,11 @@ const camTarget = new THREE.Vector3();
 let viewHalf = 24;
 function resize(){
   const w = innerWidth, h = innerHeight, asp = w/h;
-  viewHalf = asp >= 1 ? 19 : Math.max(16/asp*0.92, 19);
+  viewHalf = asp >= 1 ? 24 : Math.max(20/asp*0.92, 24);
   cam.left = -viewHalf*asp; cam.right = viewHalf*asp; cam.top = viewHalf; cam.bottom = -viewHalf;
   cam.updateProjectionMatrix();
   renderer.setSize(w, h, false);
+  if (typeof composer !== 'undefined' && composer){ composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(w, h); }
 }
 addEventListener('resize', resize); resize();
 cam.position.copy(CAM_OFF); cam.lookAt(0,0,0); cam.updateMatrixWorld();
@@ -245,14 +265,43 @@ const camRotInv = new THREE.Matrix4().extractRotation(cam.matrixWorld).invert();
 const SCR_R = new THREE.Vector3(1,0,-1).normalize();
 const SCR_U = new THREE.Vector3(-1,0,-1).normalize();
 
-const hemi = new THREE.HemisphereLight('#dfeaf5', '#5d5246', 1.25); scene.add(hemi);
-const sun = new THREE.DirectionalLight('#fff1dc', 2.4);
+const hemi = new THREE.HemisphereLight('#d6e2ee', '#4a4036', 0.55); scene.add(hemi);
+const sun = new THREE.DirectionalLight('#ffe7c4', 3.2);
 sun.castShadow = true;
-sun.shadow.mapSize.set(isTouch?1024:2048, isTouch?1024:2048);
-const sc = sun.shadow.camera; sc.left=-60; sc.right=60; sc.top=60; sc.bottom=-60; sc.near=1; sc.far=220;
-sun.shadow.bias = -0.0005; sun.shadow.normalBias = 0.04;
+sun.shadow.mapSize.set(LOW_FX?2048:4096, LOW_FX?2048:4096);
+const sc = sun.shadow.camera; sc.left=-70; sc.right=70; sc.top=70; sc.bottom=-70; sc.near=1; sc.far=260;
+sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.05; sun.shadow.radius = 3;
 scene.add(sun, sun.target);
-const SUN_OFF = new THREE.Vector3(-40, 80, 25);
+// солнце ниже — тени от домов длиннее и объёмнее
+const SUN_OFF = new THREE.Vector3(-60, 72, 38);
+
+/* ---------- постобработка: мягкое затенение углов (GTAO) и свечение вспышек ---------- */
+var composer = null;
+function setupPost(){
+  if (LOW_FX) return;   // телефоны, планшеты и ?fx=low — без постобработки, ради плавности
+  try {
+    const w = innerWidth, h = innerHeight;
+    const rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, samples: 4 });
+    composer = new EffectComposer(renderer, rt);
+    composer.setPixelRatio(renderer.getPixelRatio());
+    composer.addPass(new RenderPass(scene, cam));
+    const gtao = new GTAOPass(scene, cam, w, h);
+    // в r160 флаг ортокамеры не выставляется из-за опечатки — ставим сами
+    gtao.gtaoMaterial.defines.PERSPECTIVE_CAMERA = 0; gtao.gtaoMaterial.needsUpdate = true;
+    gtao.pdMaterial.defines.PERSPECTIVE_CAMERA = 0; gtao.pdMaterial.needsUpdate = true;
+    gtao.updateGtaoMaterial({ radius: 2.2, distanceExponent: 1.4, thickness: 1.5, scale: 1.1, samples: 16 });
+    gtao.blendIntensity = 0.85;
+    composer.addPass(gtao);
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.45, 0.5, 0.95));
+    composer.addPass(new OutputPass());
+    composer.setSize(w, h);
+  } catch(e){ console.warn('Постобработка отключена', e); composer = null; }
+}
+setupPost();
+function renderFrame(){
+  if (composer){ try { composer.render(); return; } catch(e){ console.warn(e); composer = null; } }
+  renderer.render(scene, cam);
+}
 
 /* =========================================================
    Карта: симметричный город 5×5 кварталов
@@ -318,16 +367,17 @@ async function loadCity(){
       root.traverse(o => {
         if (!o.isMesh) return;
         // в вершинных цветах лежит маска износа для шейдера Source-версии — как цвет она даёт красные подтёки
-        o.material.vertexColors = false; o.material.needsUpdate = true;
+        o.material.vertexColors = false; o.material.envMapIntensity = 0.55; o.material.needsUpdate = true;
         parts.push({ geo:o.geometry, mat:o.material, local:new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld) });
       });
       CITY.pieces[key] = parts; CITY.place[key] = [];
     }
     CITY.meta = meta;
     const tl = new THREE.TextureLoader();
-    const [asph, conc] = await Promise.all([tl.loadAsync('assets/asphalt.jpg'), tl.loadAsync('assets/concrete.jpg')]);
-    for (const t of [asph, conc]){ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; }
-    CITY.asphalt = asph; CITY.concrete = conc;
+    const [asph, conc, concN, concORM] = await Promise.all(['asphalt','concrete','concrete_n','concrete_orm'].map(n => tl.loadAsync('assets/' + n + '.jpg').catch(() => null)));
+    for (const t of [asph, conc, concN, concORM]){ if (!t) continue; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8; }
+    asph.colorSpace = conc.colorSpace = THREE.SRGBColorSpace;
+    CITY.asphalt = asph; CITY.concrete = conc; CITY.concreteN = concN; CITY.concreteORM = concORM;
     CITY.ready = true;
   } catch(e){ console.warn('Ассеты города не загрузились, рисую процедурный город', e); CITY.ready = false; }
 }
@@ -505,10 +555,11 @@ function buildMap(){
   // земля и асфальт
   let groundMat = M('#46505a', { flatShading:false }), sideMat = M('#bfb7a9');
   if (CITY.ready){
-    const a = CITY.asphalt.clone(); a.repeat.set(70,70); a.needsUpdate = true;
-    groundMat = new THREE.MeshStandardMaterial({ map:a, color:'#8f969e', roughness:.95 });
-    const c = CITY.concrete.clone(); c.repeat.set(5,5); c.needsUpdate = true;
-    sideMat = new THREE.MeshStandardMaterial({ map:c, color:'#d8d2c6', roughness:.9 });
+    const rp = (t, n) => { if (!t) return null; const c = t.clone(); c.repeat.set(n,n); c.needsUpdate = true; return c; };
+    groundMat = new THREE.MeshStandardMaterial({ map:rp(CITY.asphalt,70), normalMap:rp(CITY.concreteN,70), normalScale:new THREE.Vector2(.6,.6),
+      roughnessMap:rp(CITY.concreteORM,70), color:'#7d848c', roughness:1, envMapIntensity:.35 });
+    sideMat = new THREE.MeshStandardMaterial({ map:rp(CITY.concrete,5), normalMap:rp(CITY.concreteN,5),
+      roughnessMap:rp(CITY.concreteORM,5), color:'#cfc8bb', roughness:1, envMapIntensity:.4 });
     CITY.plazaMat = sideMat;
   }
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(400,400), groundMat);
@@ -772,20 +823,31 @@ async function loadTanks(){
     TANKS.ready = true;
   } catch(e){ console.warn('Модели танков не загрузились, рисую процедурные', e); TANKS.ready = false; }
 }
-function tankMaterials(team){
-  const c = TEAM_COL[team];
-  const base = new THREE.Color(c.body);
-  const mk = (col, o={}) => new THREE.MeshStandardMaterial({ color:col, roughness:.75, metalness:.05, flatShading:true, ...o });
-  return {
-    Main: mk(base),
-    Main_Light: mk(base.clone().lerp(new THREE.Color('#ffffff'), .22)),
-    Main_Dark: mk(base.clone().multiplyScalar(.62)),
-    Main_Details: mk(base.clone().lerp(new THREE.Color('#2a2d31'), .72)),
-    Wheels: mk('#2b2e33'),
-  };
+// родные цвета моделей из .mtl Quaternius (линейные значения Blender)
+const TANK_KD = {
+  strizh:  { Main:[0.1074,0.1521,0.1177], Main_Dark:[0.0656,0.0919,0.0717], Main_Details:[0.0953,0.1178,0.0913], Main_Light:[0.1399,0.1813,0.1046], Wheels:[0.1588,0.1663,0.1107] },
+  taran:   { Main:[0.2611,0.1995,0.1341], Main_Dark:[0.153,0.1176,0.0799],  Main_Details:[0.099,0.0779,0.06],    Main_Light:[0.4057,0.3086,0.2059], Wheels:[0.1663,0.1327,0.1092] },
+  bastion: { Main:[0.2622,0.2548,0.0936], Main_Dark:[0.1762,0.1713,0.0642], Main_Details:[0.0671,0.0697,0.0424], Main_Light:[0.1916,0.1695,0.1746], Wheels:[0.0306,0.0317,0.02] },
+  zhalo:   { Main:[0.1615,0.0707,0.0628], Main_Dark:[0.1762,0.0772,0.0576], Main_Details:[0.0954,0.0431,0.0326], Main_Light:[0.4057,0.2335,0.171],  Wheels:[0.0486,0.0395,0.033] },
+};
+function tankMaterials(cls){
+  const out = {};
+  for (const [name, [r,g,b]] of Object.entries(TANK_KD[cls])){
+    const metal = name==='Main_Details' || name==='Wheels';
+    out[name] = new THREE.MeshStandardMaterial({ color:new THREE.Color().setRGB(r,g,b), roughness: metal ? .55 : .72, metalness: metal ? .45 : .18, flatShading:true, envMapIntensity:.9 });
+  }
+  return out;
 }
+// мягкое световое пятно под танком — подсветка команды
+const GLOW_TEX = (() => {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 128; const g = cv.getContext('2d');
+  const gr = g.createRadialGradient(64,64,0,64,64,64);
+  gr.addColorStop(0,'rgba(255,255,255,.85)'); gr.addColorStop(.45,'rgba(255,255,255,.35)'); gr.addColorStop(1,'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0,0,128,128);
+  return new THREE.CanvasTexture(cv);
+})();
 function buildQuatTank(cls, team){
-  const src = TANKS.src[cls], mats = tankMaterials(team);
+  const src = TANKS.src[cls], mats = tankMaterials(cls);
   const k = TANK_LEN[cls] / 14.4;
   const remap = mesh => {
     const m = mesh.clone(); m.geometry = mesh.geometry.clone();
@@ -806,8 +868,14 @@ function buildQuatTank(cls, team){
   const barrel = new THREE.Group(); tInner.add(barrel);
   for (const c of part(/Gun/i)){ const m = remap(c); m.geometry.translate(-P.x,-P.y,-P.z); barrel.add(m); }
   const L = TANK_LEN[cls];
-  const ring = new THREE.Mesh(new THREE.RingGeometry(L*0.55, L*0.62, 32), new THREE.MeshBasicMaterial({ color:c_acc(team), transparent:true, opacity:.6, depthWrite:false }));
-  ring.rotation.x = -Math.PI/2; ring.position.y = 0.06; root.add(ring);
+  // подсветка команды: яркое кольцо (светится через bloom) и мягкое пятно света на асфальте
+  const acc = new THREE.Color(c_acc(team));
+  // кольцо — сплошной цвет команды (читается и на светлой плитке), свечение под ним — аддитивное
+  const ringMat = new THREE.MeshBasicMaterial({ color:acc, transparent:true, opacity:.95, depthWrite:false, fog:false });
+  const ring = new THREE.Mesh(new THREE.RingGeometry(L*0.56, L*0.63, 48), ringMat);
+  ring.rotation.x = -Math.PI/2; ring.position.y = 0.07; root.add(ring);
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(L*1.9, L*1.9), new THREE.MeshBasicMaterial({ map:GLOW_TEX, color:acc, transparent:true, opacity:.55, depthWrite:false, blending:THREE.AdditiveBlending, fog:false }));
+  glow.rotation.x = -Math.PI/2; glow.position.y = 0.06; ring.add(glow); glow.rotation.x = 0; glow.position.set(0,0,-0.01);
   const gunY = ((gb.min.y+gb.max.y)/2) * k;
   return {
     root, hull, turret, barrel, wheels:[], ring,
@@ -821,18 +889,41 @@ const c_acc = team => TEAM_COL[team].acc;
    Эффекты
    ========================================================= */
 const fx = [];
-const puffGeo = new THREE.IcosahedronGeometry(1, 0);
-function puff(x,y,z, size, color, life, vy=1.2, add=false){
-  const m = new THREE.MeshBasicMaterial({ color, transparent:true, opacity:.85, depthWrite:false, blending: add?THREE.AdditiveBlending:THREE.NormalBlending });
-  const mesh = new THREE.Mesh(puffGeo, m); mesh.position.set(x,y,z); mesh.scale.setScalar(size*0.4);
-  mesh.rotation.set(Math.random()*3, Math.random()*3, 0);
+// мягкая клубящаяся текстура для дыма и огня
+const SMOKE_TEX = (() => {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 128; const g = cv.getContext('2d');
+  for (let i=0;i<14;i++){
+    const x = 64 + (Math.random()-.5)*44, y = 64 + (Math.random()-.5)*44, r = 22 + Math.random()*26;
+    const gr = g.createRadialGradient(x,y,0,x,y,r);
+    gr.addColorStop(0,'rgba(255,255,255,.55)'); gr.addColorStop(1,'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.beginPath(); g.arc(x,y,r,0,Math.PI*2); g.fill();
+  }
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+// opacity — начальная непрозрачность; hot — HDR-множитель цвета для огня (светится через bloom)
+function puff(x,y,z, size, color, life, vy=1.2, add=false, opacity=.85, hot=1){
+  const col = new THREE.Color(color).multiplyScalar(hot);
+  const m = new THREE.SpriteMaterial({ map:SMOKE_TEX, color:col, transparent:true, opacity, depthWrite:false, rotation:Math.random()*Math.PI*2,
+    blending: add?THREE.AdditiveBlending:THREE.NormalBlending });
+  const mesh = new THREE.Sprite(m); mesh.position.set(x,y,z); mesh.scale.setScalar(size*0.8);
   scene.add(mesh);
-  fx.push({ mesh, life, t:0, size, vy, vx:(Math.random()-.5)*1.4, vz:(Math.random()-.5)*1.4, kind:'puff' });
+  fx.push({ mesh, life, t:0, size, vy, op0:opacity, spin:(Math.random()-.5)*0.6, vx:(Math.random()-.5)*1.4, vz:(Math.random()-.5)*1.4, kind:'puff' });
+}
+const blackSmoke = (x,y,z,k=1) => puff(x+(Math.random()-.5)*k, y, z+(Math.random()-.5)*k, (2.2+Math.random()*1.4)*k, Math.random()<.5?'#0b0b0c':'#18171a', 2.8+Math.random()*1.6, 2.4+Math.random(), false, .82);
+const fireLick = (x,y,z,k=1) => puff(x+(Math.random()-.5)*k*.8, y, z+(Math.random()-.5)*k*.8, (0.9+Math.random()*.7)*k, Math.random()<.5?'#ff8a2a':'#ffb347', 0.35+Math.random()*.25, 2.2, true, .9, 2.4);
+// вспышки света: постоянный пул ламп, чтобы не пересобирать шейдеры
+const FLASHES = [];
+for (let i=0;i<4;i++){ const l = new THREE.PointLight('#ffb15a', 0, 26, 1.6); scene.add(l); FLASHES.push({ l, t:0, life:1, i0:0 }); }
+let flashI = 0;
+function flash(x,y,z, intensity=60, life=0.18, color='#ffb15a'){
+  const f = FLASHES[flashI++ % FLASHES.length];
+  f.l.position.set(x,y,z); f.l.color.set(color); f.i0 = intensity; f.l.intensity = intensity; f.t = 0; f.life = life;
 }
 function spawnBurst(x,y,z, k=1){
-  puff(x,y+0.5,z, 3.2*k, '#ffd27a', 0.22, 0, true);
-  puff(x,y+0.5,z, 2.2*k, '#ff8a3c', 0.35, 0.5, true);
-  for (let i=0;i<5*k;i++) puff(x+(Math.random()-.5)*2*k, y+Math.random()*1.5, z+(Math.random()-.5)*2*k, (1.6+Math.random())*k, i%2?'#4a4a4a':'#6b6b6b', 1.2+Math.random(), 1.6);
+  flash(x, y+2, z, 160*k, 0.45, '#ff9a4a');
+  puff(x,y+0.6,z, 3.4*k, '#ffd27a', 0.25, 0, true, 1, 3);
+  for (let i=0;i<4*k;i++) fireLick(x, y+0.6+Math.random(), z, 1.6*k);
+  for (let i=0;i<7*k;i++) blackSmoke(x, y+0.8+Math.random()*1.5, z, 1.4*k);
   for (let i=0;i<6*k;i++){
     const d = new THREE.Mesh(new THREE.BoxGeometry(0.3,0.3,0.3), M('#3a3530'));
     d.position.set(x,y+0.6,z); scene.add(d);
@@ -840,8 +931,9 @@ function spawnBurst(x,y,z, k=1){
   }
 }
 function spark(x,y,z, color='#ffe2a3'){
-  puff(x,y,z, 1.1, color, 0.15, 0, true);
-  puff(x,y,z, 0.9, '#777', 0.6, 1);
+  flash(x, y, z, 35, 0.12, color);
+  puff(x,y,z, 1.3, color, 0.14, 0, true, 1, 2.5);
+  puff(x,y,z, 1.3, '#26262a', 0.9, 1.4, false, .7);
 }
 // следы гусениц
 const TRACK_N = 500;
@@ -903,7 +995,7 @@ let tanks = [];        // {team, cls, st, x,z,h, th, speed, hp, alive, reload, m
 let shells = [];
 let shellId = 0;
 const shellGeo = new THREE.BoxGeometry(0.22,0.22,1.1);
-const shellMat = new THREE.MeshBasicMaterial({ color:'#fff1b8' });
+const shellMat = new THREE.MeshBasicMaterial({ color:new THREE.Color('#ffd98a').multiplyScalar(4) });
 
 function spawnTank(team, cls, opts={}){
   const st = derive(CLASSES[cls].s);
@@ -998,8 +1090,9 @@ function makeShell(id, team, cls, x, z, dx, dz, y=1.6){
   const mesh = new THREE.Mesh(shellGeo, shellMat); mesh.position.set(x, y, z); mesh.rotation.y = Math.atan2(dx,dz);
   scene.add(mesh);
   shells.push({ id, team, cls, x, z, y, dx, dz, v:st.shellSpeed, life: st.range/st.shellSpeed, mesh });
-  puff(x, y, z, 1.6, '#ffd27a', 0.1, 0, true);
-  puff(x+dx*0.6, y, z+dz*0.6, 1.2, '#999', 0.7, 1.2);
+  flash(x, y, z, 50, 0.1, '#ffc27a');
+  puff(x, y, z, 1.8, '#ffd27a', 0.09, 0, true, 1, 3);
+  puff(x+dx*0.8, y, z+dz*0.8, 1.6, '#2c2c30', 1.1, 1.2, false, .6);
   const me = myTank(); const near = me ? clamp(1 - Math.hypot(me.x-x, me.z-z)/90, 0.15, 1) : 1;
   sfx.shot(cls==='bastion'||cls==='zhalo' ? 1.2 : 0.9, near);
   if (me && Math.hypot(me.x-x, me.z-z) < 6) shake = Math.max(shake, 0.35);
@@ -1083,7 +1176,7 @@ function killTank(t){
   fx.push({ mesh:tur, kind:'debris', t:0, life:3, vx:(Math.random()-.5)*6, vy:14, vz:(Math.random()-.5)*6, spin:6, keep:true });
   t.model.hull.traverse(o=>{ if(o.isMesh) o.material = WRECK; });
   t.model.ring.visible = false; t.smoke = 999;
-  if (controlsTank(t)) endMatch(t.team, 'tank');
+  if (controlsTank(t)) endRound(t.team);
 }
 function applyStatueDamage(st, dmg, hx, hz){
   if (!st.alive) return;
@@ -1250,9 +1343,12 @@ function syncModel(t, dt){
     dropTrack(t.x + Math.cos(t.h)*W, t.z - Math.sin(t.h)*W, t.h);
     dropTrack(t.x - Math.cos(t.h)*W, t.z + Math.sin(t.h)*W, t.h);
     t.lastTrack.x = t.x; t.lastTrack.z = t.z;
-    if (Math.abs(t.speed) > 2 && Math.random() < 0.35) puff(t.x - Math.sin(t.h)*2.4, 0.6, t.z - Math.cos(t.h)*2.4, 0.9, '#b9ad97', 0.8, 0.6);
+    if (Math.abs(t.speed) > 2 && Math.random() < 0.35) puff(t.x - Math.sin(t.h)*2.4, 0.5, t.z - Math.cos(t.h)*2.4, 1.2, '#a89c86', 1.0, 0.5, false, .35);
   }
-  if (t.smoke && Math.random() < 0.25) puff(t.x+(Math.random()-.5), 1.5, t.z+(Math.random()-.5), 1.4, '#2e2e2e', 2, 2.2);
+  if (t.smoke){
+    if (Math.random() < 0.35) blackSmoke(t.x, 1.8, t.z, 1.1);
+    if (Math.random() < 0.3) fireLick(t.x, 1.2, t.z, 1.2);
+  }
 }
 
 /* =========================================================
@@ -1467,6 +1563,7 @@ function onNet(m){
       const st = statues[m.team]; if (!st || !st.alive) return;
       st.hp = m.hp + m.dmg; applyStatueDamage(st, m.dmg, m.x, m.z); break; }
     case 'over': finishMatch(m.loser, m.why); break;
+    case 'round': applyRound(m.loser, m.a, m.b); break;
   }
 }
 
@@ -1476,6 +1573,10 @@ function onNet(m){
 let state = 'menu', mode = 'bot', myCls = 'taran', myTeam = 'A';
 let shake = 0, matchT = 0, countdown = 0, overTimer = 0, pendingOver = null;
 const score = { me:0, them:0 };
+// раунды: подбитый танк — очко сопернику, до 5; снесённая статуя — сразу победа в матче
+const ROUNDS_TO_WIN = 5;
+const rounds = { A:0, B:0 };
+let roundNo = 1, roundOver = null, teamCls = { A:'taran', B:'taran' };
 function myTank(){ return tanks.find(t => t.local && !t.bot); }
 function controlsTank(t){ return t.local; }
 function controlsStatue(st){ return mode==='bot' ? true : st.team === myTeam; }
@@ -1489,19 +1590,51 @@ function startMatch(m, mine, theirs){
     st.hp = STATUE_HP; st.alive = true;
     if (st.fig.parent !== st.group){ scene.remove(st.fig); st.group.add(st.fig); st.fig.position.set(0,2.3,0); st.fig.rotation.set(0,0,0); }
   }
-  const me = spawnTank(myTeam, mine, { local:true });
-  if (m==='bot') spawnTank(enemyTeam, theirs, { local:true, bot:true });
-  else spawnTank(enemyTeam, theirs, { net:true });
+  teamCls = { [myTeam]: mine, [enemyTeam]: theirs };
+  rounds.A = 0; rounds.B = 0; roundNo = 1; roundOver = null;
+  const me = spawnRoundTanks();
+  updateRoundsHUD();
   $('#whoA').textContent = 'Вы · ' + CLASSES[mine].name;
   $('#whoB').textContent = (m==='bot' ? 'Бот · ' : 'Соперник · ') + CLASSES[theirs].name;
   document.documentElement.style.setProperty('--team-a', TEAM_COL[myTeam].acc);
   document.documentElement.style.setProperty('--team-b', TEAM_COL[enemyTeam].acc);
-  state = 'play'; matchT = 0; countdown = 3; pendingOver = null;
+  state = 'play'; matchT = 0; pendingOver = null;
   hideAll(); $('#hud').hidden = false; $('#touch').hidden = !isTouchPlaying;
   $('#cursor').hidden = isTouchPlaying;
-  $('#hint').textContent = isTouchPlaying ? '' : 'Танк врага — красное кольцо. Статуя врага — за жёлтой стрелкой.';
+  $('#hint').textContent = isTouchPlaying ? '' : `Подбей врага ${ROUNDS_TO_WIN} раз или снеси его статую — она за жёлтой стрелкой.`;
   camTarget.set(me.x, 0, me.z);
   sfx.init();
+}
+// новый раунд: танки заново у баз, статуи и разрушения остаются
+function spawnRoundTanks(){
+  clearTanks();
+  const enemyTeam = myTeam==='A' ? 'B' : 'A';
+  const me = spawnTank(myTeam, teamCls[myTeam], { local:true });
+  if (mode==='bot') spawnTank(enemyTeam, teamCls[enemyTeam], { local:true, bot:true });
+  else spawnTank(enemyTeam, teamCls[enemyTeam], { net:true });
+  countdown = 3; camTarget.set(me.x, 0, me.z);
+  return me;
+}
+function updateRoundsHUD(){
+  const enemyTeam = myTeam==='A' ? 'B' : 'A';
+  $('#roundsMe').textContent = rounds[myTeam]; $('#roundsThem').textContent = rounds[enemyTeam];
+}
+// зовёт тот, кто управляет подбитым танком
+function endRound(loserTeam){
+  if (pendingOver || roundOver) return;
+  const winner = loserTeam==='A' ? 'B' : 'A';
+  const a = rounds.A + (winner==='A'?1:0), b = rounds.B + (winner==='B'?1:0);
+  if (net.conn) net.send({ t:'round', loser:loserTeam, a, b });
+  applyRound(loserTeam, a, b);
+}
+function applyRound(loserTeam, a, b){
+  if (pendingOver || roundOver) return;
+  rounds.A = a; rounds.B = b; updateRoundsHUD();
+  const winner = loserTeam==='A' ? 'B' : 'A';
+  if (rounds[winner] >= ROUNDS_TO_WIN){ finishMatch(loserTeam, 'rounds'); return; }
+  const mine = winner === myTeam;
+  showToast(mine ? 'Раунд твой' : 'Раунд за соперником', 1800);
+  roundOver = { t: 2.8 };
 }
 function endMatch(loserTeam, why){
   // вызывается тем, кто управляет погибшим объектом
@@ -1521,9 +1654,10 @@ function showOver(){
   const { won, why } = pendingOver;
   $('#overTitle').textContent = won ? 'Победа' : 'Поражение';
   $('#overWhy').textContent = won
-    ? (why==='tank' ? 'Танк соперника горит.' : 'Статуя соперника лежит на площади.')
-    : (why==='tank' ? 'Твой танк подбит.' : 'Твою статую снесли.');
-  $('#overScore').textContent = `Счёт серии ${score.me} : ${score.them}`;
+    ? (why==='statue' ? 'Статуя соперника лежит на площади.' : `Ты первым подбил соперника ${ROUNDS_TO_WIN} раз.`)
+    : (why==='statue' ? 'Твою статую снесли.' : `Соперник первым подбил тебя ${ROUNDS_TO_WIN} раз.`);
+  const enemyTeam = myTeam==='A' ? 'B' : 'A';
+  $('#overScore').textContent = `Раунды ${rounds[myTeam]} : ${rounds[enemyTeam]}. Счёт серии ${score.me} : ${score.them}`;
   state = 'over'; $('#touch').hidden = true; show('scrOver');
 }
 function endLocal(){ state='menu'; $('#hud').hidden = true; $('#touch').hidden = true; clearTanks(); show('scrMenu'); sfx.engine(0,false); }
@@ -1624,10 +1758,14 @@ function updateFaders(dt){
 /* ---------- кадр ---------- */
 let last = performance.now(), netAcc = 0, menuSpin = 0, previewTank = null;
 function tickPlay(dt){
+  if (roundOver && !pendingOver){
+    roundOver.t -= dt;
+    if (roundOver.t <= 0){ roundOver = null; roundNo++; spawnRoundTanks(); }
+  }
   matchT += dt;
   if (countdown > 0){
     const before = Math.ceil(countdown); countdown -= dt; const after = Math.ceil(countdown);
-    if (after !== before || matchT < dt*1.5) showToast(after > 0 ? String(after) : 'Вперёд', 700);
+    if (after !== before || countdown > 2.97) showToast(after > 0 ? `Раунд ${roundNo} · ${after}` : 'Вперёд', 700);
   }
   for (const t of tanks){
     if (t.local && !t.bot) playerInput(t);
@@ -1673,7 +1811,7 @@ function frame(now){
   for (let i=fx.length-1;i>=0;i--){
     const f = fx[i]; f.t += dt;
     if (f.kind==='puff'){
-      const k = f.t/f.life; f.mesh.scale.setScalar(f.size*(0.4+k*0.9)); f.mesh.material.opacity = 0.85*(1-k);
+      const k = f.t/f.life; f.mesh.scale.setScalar(f.size*(0.5+k*1.2)); f.mesh.material.opacity = f.op0*(1-k)*(1-k*0.3); f.mesh.material.rotation += f.spin*dt;
       f.mesh.position.y += f.vy*dt; f.mesh.position.x += f.vx*dt; f.mesh.position.z += f.vz*dt;
     } else {
       f.vy -= 24*dt; f.mesh.position.x += f.vx*dt; f.mesh.position.y += f.vy*dt; f.mesh.position.z += f.vz*dt;
@@ -1683,7 +1821,8 @@ function frame(now){
     if (f.t >= f.life && !f.keep){ scene.remove(f.mesh); if (f.kind==='puff') f.mesh.material.dispose(); fx.splice(i,1); }
     else if (f.t >= f.life){ fx.splice(i,1); }
   }
-  for (const ob of props){ if (ob.smoke > 0 && Math.random() < 0.05){ const p = ob.mesh.position; puff(p.x, 1.5, p.z, 1.2, '#333', 2, 1.8); } }
+  for (const ob of props){ if (ob.smoke > 0){ const p = ob.mesh.position; if (Math.random() < 0.12) blackSmoke(p.x, 1.4, p.z, .8); if (Math.random() < 0.08) fireLick(p.x, 1, p.z, .8); } }
+  for (const f of FLASHES){ if (f.l.intensity > 0){ f.t += dt; f.l.intensity = f.i0 * Math.max(0, 1 - f.t/f.life); } }
   for (const st of Object.values(statues)) st.flag.rotation.y = Math.sin(now*0.003 + st.x)*0.25;
 
   // камера
@@ -1694,7 +1833,7 @@ function frame(now){
   sun.position.set(camTarget.x + SUN_OFF.x, SUN_OFF.y, camTarget.z + SUN_OFF.z);
   sun.target.position.set(camTarget.x, 0, camTarget.z);
   updateFaders(dt);
-  renderer.render(scene, cam);
+  renderFrame();
 }
 
 /* =========================================================
