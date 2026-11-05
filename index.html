@@ -1348,37 +1348,79 @@ function botThink(b, dt){
 }
 
 /* =========================================================
-   Сеть: P2P по ссылке через Trystero поверх публичных MQTT-брокеров (как в «Офисе»)
+   Сеть: комната по ссылке через публичные MQTT-брокеры.
+   Сообщения идут прямо через брокеры (без WebRTC) — работает за любым NAT и в любом браузере.
+   Шлём во все подключённые брокеры, на приёме отсекаем дубли по номеру сообщения.
    ========================================================= */
-const APP_ID = 'plairpro-lordoftanks';
+const BROKERS = [
+  { url:'wss://broker.emqx.io:8084/mqtt' },
+  { url:'wss://broker.hivemq.com:8884/mqtt' },
+  { url:'wss://public.cloud.shiftr.io', username:'public', password:'public' },
+];
+const SELF_ID = Math.random().toString(36).slice(2,10);
 const net = {
-  role:null, room:null, conn:null, code:null, peerId:null, ready:{ me:false, them:false }, theirCls:null, _send:null, failT:null,
-  send(m){ try { if (this.conn && this._send) this._send(m); } catch(e){} },
-  close(){ clearTimeout(this.failT); try{ this.room && this.room.leave(); }catch(e){} this.room=null; this.conn=null; this.peerId=null; this._send=null; this.role=null; },
+  role:null, conn:null, code:null, peerId:null, ready:{ me:false, them:false }, theirCls:null,
+  clients:[], topic:null, seq:0, seen:{}, lastHeard:0, failT:null, hiT:null, watchT:null,
+  send(m){ if (!this.topic) return; this._pub({ f:SELF_ID, s:++this.seq, m }); },
+  _pub(obj){ const s = JSON.stringify(obj); for (const c of this.clients){ try { if (c.connected) c.publish(this.topic, s, { qos:0 }); } catch(e){} } },
+  close(){
+    clearTimeout(this.failT); clearInterval(this.hiT); clearInterval(this.watchT);
+    if (this.topic) this._pub({ f:SELF_ID, s:++this.seq, bye:1 });
+    const cs = this.clients; setTimeout(() => { for (const c of cs){ try { c.end(true); } catch(e){} } }, 200);
+    this.clients = []; this.topic = null; this.conn = null; this.peerId = null; this.role = null; this.seen = {};
+  },
 };
-let trysteroMod = null;
-async function loadTrystero(){ return trysteroMod ||= await import('./vendor/trystero-mqtt.js'); }
+let mqttMod = null;
+async function loadMqtt(){ return mqttMod ||= (await import('./vendor/mqtt.js')).default; }
+function peerJoined(id){
+  if (net.peerId) return;
+  net.peerId = id; net.conn = { open:true }; clearTimeout(net.failT);
+  if (net.role==='host'){ show('scrSelect'); $('#selTitle').textContent = 'Соперник на месте. Выбери танк'; }
+  else if (!net.ready.me) $('#selTitle').textContent = 'Соперник на связи. Выбери танк';
+  if (net.ready.me) net.send({ t:'ready', cls:myCls });
+}
+function peerLeft(){
+  const wasPlaying = state==='play';
+  net.close();
+  if (wasPlaying){ showToast('Соперник отключился', 2500); setTimeout(()=>{ endLocal(); }, 1200); }
+  else if (state!=='menu'){ show('scrMenu'); showToast('Соперник отключился', 2500); }
+}
+function onRaw(buf){
+  let o; try { o = JSON.parse(typeof buf === 'string' ? buf : new TextDecoder().decode(buf)); } catch(e){ return; }
+  if (!o || o.f === SELF_ID) return;
+  if (net.peerId && o.f !== net.peerId) return;          // в комнате только двое
+  // дубли из разных брокеров отсекаем по номеру; порядок между брокерами может плыть,
+  // поэтому помним окно номеров, а устаревшие координаты просто пропускаем
+  const seen = net.seen[o.f] ||= { set:new Set(), q:[], lastState:0 };
+  if (seen.set.has(o.s)) return;
+  seen.set.add(o.s); seen.q.push(o.s); if (seen.q.length > 400) seen.set.delete(seen.q.shift());
+  if (o.m && o.m.t === 's'){ if (o.s < seen.lastState) return; seen.lastState = o.s; }
+  net.lastHeard = performance.now();
+  if (!net.peerId) peerJoined(o.f);
+  if (o.bye) { peerLeft(); return; }
+  if (o.hi) { if (!o.ack) net._pub({ f:SELF_ID, s:++net.seq, hi:1, ack:1 }); return; }
+  if (o.m) onNet(o.m);
+}
 async function openRoom(code){
-  const { joinRoom } = await loadTrystero();
-  const room = joinRoom({ appId: APP_ID }, code);
-  // Trystero 0.26: makeAction отдаёт объект, обработчики назначаются свойствами
-  const action = room.makeAction('m');
-  net.room = room; net._send = m => { action.send(m)?.catch?.(() => {}); };
-  action.onMessage = (m, ctx) => { if (ctx && ctx.peerId === net.peerId) onNet(m); };
-  room.onPeerJoin = (id => {
-    if (net.peerId) return;            // в комнате только двое
-    net.peerId = id; net.conn = { open:true }; clearTimeout(net.failT);
-    if (net.role==='host'){ show('scrSelect'); $('#selTitle').textContent = 'Соперник на месте. Выбери танк'; }
-    else if (!net.ready.me) $('#selTitle').textContent = 'Соперник на связи. Выбери танк';
-    if (net.ready.me) net.send({ t:'ready', cls:myCls });
-  });
-  room.onPeerLeave = (id => {
-    if (id !== net.peerId) return;
-    const wasPlaying = state==='play';
-    net.close();
-    if (wasPlaying){ showToast('Соперник отключился', 2500); setTimeout(()=>{ endLocal(); }, 1200); }
-    else if (state!=='menu'){ show('scrMenu'); showToast('Соперник отключился', 2500); }
-  });
+  const mqtt = await loadMqtt();
+  net.topic = 'plairpro/lordoftanks/v1/' + code;
+  let anyUp = false;
+  for (const b of BROKERS){
+    const c = mqtt.connect(b.url, { clientId:'lot_' + SELF_ID + '_' + Math.random().toString(36).slice(2,6), username:b.username, password:b.password, clean:true, reconnectPeriod:3000, connectTimeout:8000, keepalive:30 });
+    c.on('connect', () => { anyUp = true; c.subscribe(net.topic, { qos:0 }); });
+    c.on('message', (t, payload) => { if (t === net.topic) onRaw(payload); });
+    c.on('error', () => {});
+    net.clients.push(c);
+  }
+  // приветствие, пока не найдём соперника; дальше — сторож связи
+  net.hiT = setInterval(() => { if (!net.peerId) net._pub({ f:SELF_ID, s:++net.seq, hi:1 }); }, 1200);
+  net.watchT = setInterval(() => {
+    if (net.peerId){
+      if (performance.now() - net.lastHeard > 9000) peerLeft();
+      else if (state !== 'play') net._pub({ f:SELF_ID, s:++net.seq, hi:1, ack:1 });   // пульс вне боя
+    }
+  }, 2000);
+  setTimeout(() => { if (!anyUp && net.topic) netFail('Не удалось подключиться к серверам связи. Проверь интернет.'); }, 10000);
 }
 async function hostRoom(){
   show('scrLobby');
@@ -1603,7 +1645,7 @@ function tickPlay(dt){
   stepShells(dt);
   // отправка состояния
   const me = myTank();
-  if (net.conn && me){ netAcc += dt; if (netAcc > 0.05){ netAcc = 0; net.send({ t:'s', x:+me.x.toFixed(2), z:+me.z.toFixed(2), h:+me.h.toFixed(3), th:+me.th.toFixed(3), v:+me.speed.toFixed(2) }); } }
+  if (net.conn && me){ netAcc += dt; if (netAcc > 0.066){ netAcc = 0; net.send({ t:'s', x:+me.x.toFixed(2), z:+me.z.toFixed(2), h:+me.h.toFixed(3), th:+me.th.toFixed(3), v:+me.speed.toFixed(2) }); } }
   if (me){
     sfx.engine(Math.abs(me.speed)/me.st.maxSpeed, me.alive);
     // камера с упреждением по прицелу
