@@ -1361,17 +1361,18 @@ async function loadTrystero(){ return trysteroMod ||= await import('./vendor/try
 async function openRoom(code){
   const { joinRoom } = await loadTrystero();
   const room = joinRoom({ appId: APP_ID }, code);
-  const [send, get] = room.makeAction('m');
-  net.room = room; net._send = send;
-  get((m, from) => { if (from === net.peerId) onNet(m); });
-  room.onPeerJoin(id => {
+  // Trystero 0.26: makeAction отдаёт объект, обработчики назначаются свойствами
+  const action = room.makeAction('m');
+  net.room = room; net._send = m => { action.send(m)?.catch?.(() => {}); };
+  action.onMessage = (m, ctx) => { if (ctx && ctx.peerId === net.peerId) onNet(m); };
+  room.onPeerJoin = (id => {
     if (net.peerId) return;            // в комнате только двое
     net.peerId = id; net.conn = { open:true }; clearTimeout(net.failT);
     if (net.role==='host'){ show('scrSelect'); $('#selTitle').textContent = 'Соперник на месте. Выбери танк'; }
     else if (!net.ready.me) $('#selTitle').textContent = 'Соперник на связи. Выбери танк';
     if (net.ready.me) net.send({ t:'ready', cls:myCls });
   });
-  room.onPeerLeave(id => {
+  room.onPeerLeave = (id => {
     if (id !== net.peerId) return;
     const wasPlaying = state==='play';
     net.close();
