@@ -1416,8 +1416,8 @@ async function openRoom(code){
   net.hiT = setInterval(() => { if (!net.peerId) net._pub({ f:SELF_ID, s:++net.seq, hi:1 }); }, 1200);
   net.watchT = setInterval(() => {
     if (net.peerId){
-      if (performance.now() - net.lastHeard > 9000) peerLeft();
-      else if (state !== 'play') net._pub({ f:SELF_ID, s:++net.seq, hi:1, ack:1 });   // пульс вне боя
+      if (performance.now() - net.lastHeard > 20000) peerLeft();
+      else net._pub({ f:SELF_ID, s:++net.seq, hi:1, ack:1 });   // пульс: таймеры живут и в свёрнутой вкладке
     }
   }, 2000);
   setTimeout(() => { if (!anyUp && net.topic) netFail('Не удалось подключиться к серверам связи. Проверь интернет.'); }, 10000);
