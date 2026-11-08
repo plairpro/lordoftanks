@@ -266,7 +266,7 @@ const SCR_R = new THREE.Vector3(1,0,-1).normalize();
 const SCR_U = new THREE.Vector3(-1,0,-1).normalize();
 
 const hemi = new THREE.HemisphereLight('#d6e2ee', '#4a4036', 0.55); scene.add(hemi);
-const sun = new THREE.DirectionalLight('#ffe7c4', 3.2);
+const sun = new THREE.DirectionalLight('#ffe7c4', 2.6);
 sun.castShadow = true;
 sun.shadow.mapSize.set(LOW_FX?2048:4096, LOW_FX?2048:4096);
 const sc = sun.shadow.camera; sc.left=-70; sc.right=70; sc.top=70; sc.bottom=-70; sc.near=1; sc.far=260;
@@ -291,8 +291,19 @@ function setupPost(){
     gtao.pdMaterial.defines.PERSPECTIVE_CAMERA = 0; gtao.pdMaterial.needsUpdate = true;
     gtao.updateGtaoMaterial({ radius: 2.2, distanceExponent: 1.4, thickness: 1.5, scale: 1.1, samples: 16 });
     gtao.blendIntensity = 0.85;
+    // прозрачное (дым, огонь, трассеры, кольца, следы, полупрозрачные дома) в затенение не пускаем —
+    // иначе GTAO рисует спрайты сплошными квадратами и даёт тёмные «коробки» дыма
+    gtao.overrideVisibility = function(){
+      const cache = this._visibilityCache;
+      this.scene.traverse(o => {
+        cache.set(o, o.visible);
+        const m = o.material, transp = m && (Array.isArray(m) ? m.some(x => x.transparent) : m.transparent);
+        if (o.isPoints || o.isLine || o.isSprite || transp) o.visible = false;
+      });
+    };
     composer.addPass(gtao);
-    composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.45, 0.5, 0.95));
+    // порог выше 1: светятся только огонь, вспышки и трассеры, а не белые поверхности
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.35, 0.45, 1.15));
     composer.addPass(new OutputPass());
     composer.setSize(w, h);
   } catch(e){ console.warn('Постобработка отключена', e); composer = null; }
@@ -498,7 +509,7 @@ function addProp(kind, x, z, rotY, color){
     g.add(body,cab,roofm);
   } else if (kind==='block'){
     w=1.2; d=3.2; hp=120;
-    const geo = new THREE.BoxGeometry(1.1,1.1,3.1); const m = new THREE.Mesh(geo, M('#bdb6aa')); m.position.y=0.55; g.add(m);
+    const geo = new THREE.BoxGeometry(1.1,1.1,3.1); const m = new THREE.Mesh(geo, M('#8e8a82')); m.position.y=0.55; g.add(m);
     const s = new THREE.Mesh(new THREE.BoxGeometry(1.12,0.2,3.12), M('#d9a43a')); s.position.y=0.8; g.add(s);
   } else if (kind==='bags'){
     w=1.6; d=5.2; hp=150;
@@ -572,7 +583,7 @@ function buildMap(){
   curb.receiveShadow = true; mapRoot.add(curb);
   // разметка
   const dashGeo = new THREE.BoxGeometry(0.35,0.04,2.6);
-  const dashes = new THREE.InstancedMesh(dashGeo, M('#e9e3d2'), 600); let di=0;
+  const dashes = new THREE.InstancedMesh(dashGeo, M('#9c9a93'), 600); let di=0;
   const dq = new THREE.Quaternion(), dv = new THREE.Vector3(), ds = new THREE.Vector3(1,1,1);
   for (const r of ROADS) for (let t=-84; t<=84; t+=6){
     if (ROADS.some(q=>Math.abs(q-t)<6.5)) continue;
@@ -581,7 +592,7 @@ function buildMap(){
   }
   dashes.count = di; mapRoot.add(dashes);
   // зебры у перекрёстков
-  const zebra = new THREE.InstancedMesh(new THREE.BoxGeometry(0.7,0.04,3.4), M('#e9e3d2'), 1200); let zi=0;
+  const zebra = new THREE.InstancedMesh(new THREE.BoxGeometry(0.7,0.04,3.4), M('#9c9a93'), 1200); let zi=0;
   for (const rx of ROADS) for (const rz of ROADS){
     if (Math.abs(rx)>79 || Math.abs(rz)>79) continue;
     for (const side of [-1,1]) for (let k=-3;k<=3;k++){
@@ -624,7 +635,7 @@ function buildMap(){
   addBase('A'); addBase('B');
 
   // машины и блоки на дорогах (половина + отражение)
-  const carCols = ['#d94f3d','#3f7cc4','#e8c547','#f1efe9','#4aa37a','#2e3238','#e48a3c'];
+  const carCols = ['#d94f3d','#3f7cc4','#e8c547','#c4c1b9','#4aa37a','#2e3238','#e48a3c'];
   for (let n=0; n<26; n++){
     const alongX = rng()<.5;
     const line = ROADS[1 + Math.floor(rng()*4)];
@@ -696,9 +707,9 @@ function planBlock(type, rng){
 
 function addFountain(x,z){
   const g = new THREE.Group(); g.position.set(x,0,z);
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(2.4,2.6,0.8,10), M('#c7beb0')); base.position.y=0.4;
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(2.4,2.6,0.8,10), M('#9a948a')); base.position.y=0.4;
   const water = new THREE.Mesh(new THREE.CylinderGeometry(2.0,2.0,0.1,10), M('#6fb3c9',{roughness:.2})); water.position.y=0.78;
-  const col = new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.5,1.6,8), M('#c7beb0')); col.position.y=1.4;
+  const col = new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.5,1.6,8), M('#9a948a')); col.position.y=1.4;
   g.add(base,water,col); g.traverse(o=>{if(o.isMesh){o.castShadow=o.receiveShadow=true}});
   mapRoot.add(g);
   obstacles.push({ minX:x-2.3, maxX:x+2.3, minZ:z-2.3, maxZ:z+2.3, kind:'bld', alive:true, top:1 });
